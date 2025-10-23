@@ -97,7 +97,9 @@ By default, the admission controller and Kubernetes api-server skip the [TLS ver
         secretName: tidb-operator-ca-secret
     ```
 
-    `${namespace}` is the name of the operator, usually `tidb-operator`. The above YAML file creates three objects:
+    `${namespace}` is the name of the operator, usually `tidb-admin`, this namespace must exist before creating the objects.
+
+    The above YAML file creates three objects:
 
     - An Issuer object of the SelfSigned type, used to generate the CA certificate needed by Issuer of the CA type;
     - A Certificate object, whose `isCa` is set to `true`.
@@ -108,6 +110,17 @@ By default, the admission controller and Kubernetes api-server skip the [TLS ver
     ```shell
     kubectl apply -f tidb-operator-issuer.yaml
     ```
+
+    To check if the issuer and certificate are ready:
+    ```
+    $ kubectl -n tidb-admin get issuer.cert-manager.io,certificate.cert-manager.io -o wide
+    NAME                                                        READY   STATUS                AGE
+    issuer.cert-manager.io/tidb-operator-issuer                 True    Signing CA verified   118s
+    issuer.cert-manager.io/tidb-operator-selfsigned-ca-issuer   True                          118s
+    
+    NAME                                           READY   SECRET                    ISSUER                               STATUS                                          AGE
+    certificate.cert-manager.io/tidb-operator-ca   True    tidb-operator-ca-secret   tidb-operator-selfsigned-ca-issuer   Certificate is up to date and has not expired   118s
+```
 
 3. Generate the certificate for the admission controller.
 
@@ -124,24 +137,24 @@ By default, the admission controller and Kubernetes api-server skip the [TLS ver
         duration: 8760h # 365d
         renewBefore: 360h # 15d
         subject:
-        organizations:
-        - PingCAP
+          organizations:
+          - PingCAP
         commonName: "TiDB Operator Webhook"
         usages:
-        - server auth
-        - client auth
+          - server auth
+          - client auth
         dnsNames:
-        - "tidb-admission-webhook.${namespace}",
-        - "tidb-admission-webhook.${namespace}.svc",
-        - "tidb-admission-webhook.${namespace}.svc.cluster",
-        - "tidb-admission-webhook.${namespace}.svc.cluster.local"
+          - "tidb-admission-webhook.${namespace}"
+          - "tidb-admission-webhook.${namespace}.svc"
+          - "tidb-admission-webhook.${namespace}.svc.cluster"
+          - "tidb-admission-webhook.${namespace}.svc.cluster.local"
         ipAddresses:
-        - 127.0.0.1
-        - ::1
+          - 127.0.0.1
+          - ::1
         issuerRef:
-        name: tidb-operator-issuer
-        kind: Issuer
-        group: cert-manager.io
+          name: tidb-operator-issuer
+          kind: Issuer
+          group: cert-manager.io
     ```
 
     `${namespace}` is the namespace which TiDB Operator is deployed in.
@@ -149,6 +162,41 @@ By default, the admission controller and Kubernetes api-server skip the [TLS ver
     ```shell
     kubectl apply -f webhook-server.yaml
     ```
+
+    To check if the certificate is ready:
+
+    ```
+    $ kubectl -n tidb-admin get certificate.cert-manager.io/webhook-server-secret -o wide
+    NAME                    READY   SECRET                  ISSUER                 STATUS                                          AGE
+    webhook-server-secret   True    webhook-server-secret   tidb-operator-issuer   Certificate is up to date and has not expired   70s
+    ```
+
+    The secret should have 3 files:
+
+    ```
+    $ kubectl -n tidb-admin describe secret/webhook-server-secret 
+    Name:         webhook-server-secret
+    Namespace:    tidb-admin
+    Labels:       controller.cert-manager.io/fao=true
+    Annotations:  cert-manager.io/alt-names:
+                    tidb-admission-webhook.tidb-admin,tidb-admission-webhook.tidb-admin.svc,tidb-admission-webhook.tidb-admin.svc.cluster,tidb-admission-webho...
+                  cert-manager.io/certificate-name: webhook-server-secret
+                  cert-manager.io/common-name: TiDB Operator Webhook
+                  cert-manager.io/ip-sans: 127.0.0.1,::1
+                  cert-manager.io/issuer-group: cert-manager.io
+                  cert-manager.io/issuer-kind: Issuer
+                  cert-manager.io/issuer-name: tidb-operator-issuer
+                  cert-manager.io/subject-organizations: PingCAP
+                  cert-manager.io/uri-sans: 
+    
+    Type:  kubernetes.io/tls
+    
+    Data
+    ====
+    ca.crt:   1103 bytes
+    tls.crt:  1448 bytes
+    tls.key:  1679 bytes
+```
 
 4. Modify `values.yaml`, and install or upgrade TiDB Operator.
 
