@@ -46,110 +46,116 @@ With a default installation, TiDB Operator disables the admission controller. Ta
 
 By default, the admission controller and Kubernetes api-server skip the [TLS verification](https://kubernetes.io/docs/tasks/access-kubernetes-api/configure-aggregation-layer/#contacting-the-extension-apiserver). To manually enable and configure the TLS verification between the admission controller and Kubernetes api-server, take the following steps:
 
-1. Generate the custom certificate.
+1. Install `cert-manager`.
 
-    To generate the custom CA (client auth) file, refer to Step 1 to Step 4 in [Generate certificates using `cfssl`](enable-tls-between-components.md#using-cfssl).
+    Refer to [cert-manager installation on Kubernetes](https://cert-manager.io/docs/installation/) for details.
 
-    Use the following configuration in `ca-config.json`:
+2. Create an Issuer to issue certificates to the TiDB operator.
 
-    ```json
-    {
-        "signing": {
-            "default": {
-                "expiry": "8760h"
-            },
-            "profiles": {
-                "server": {
-                    "expiry": "8760h",
-                    "usages": [
-                        "signing",
-                        "key encipherment",
-                        "server auth"
-                    ]
-                }
-            }
-        }
-    }
-    ```
+    To configure `cert-manager`, create the Issuer resources.
 
-    After executing Step 4, run the `ls` command. The following files should be listed in the `cfssl` folder:
-
-    ```bash
-    ca-config.json    ca-csr.json    ca-key.pem    ca.csr    ca.pem
-    ```
-
-2. Generate the certificate for the admission controller.
-
-    1. Create the default `webhook-server.json` file:
-
-        {{< copyable "shell-regular" >}}
-
-        ```shell
-        cfssl print-defaults csr > webhook-server.json
-        ```
-
-    2. Modify the `webhook-server.json` file as follows:
-
-        ```json
-        {
-            "CN": "TiDB Operator Webhook",
-            "hosts": [
-                "tidb-admission-webhook.<namespace>",
-                "tidb-admission-webhook.<namespace>.svc",
-                "tidb-admission-webhook.<namespace>.svc.cluster",
-                "tidb-admission-webhook.<namespace>.svc.cluster.local"
-            ],
-            "key": {
-                "algo": "rsa",
-                "size": 2048
-            },
-            "names": [
-                {
-                    "C": "US",
-                    "L": "CA",
-                    "O": "PingCAP",
-                    "ST": "Beijing",
-                    "OU": "TiDB"
-                }
-            ]
-        }
-        ```
-
-        `<namespace>` is the namespace which TiDB Operator is deployed in.
-
-    3. Generate the server-side certificate for TiDB Operator Webhook:
-
-        {{< copyable "shell-regular" >}}
-
-        ```shell
-        cfssl gencert -ca=ca.pem -ca-key=ca-key.pem -config=ca-config.json -profile=server webhook-server.json | cfssljson -bare webhook-server
-        ```
-
-    4. Run the `ls | grep webhook-server` command. The following files should be listed:
-
-        ```bash
-        webhook-server-key.pem
-        webhook-server.csr
-        webhook-server.json
-        webhook-server.pem
-        ```
-
-3. Create a secret in the Kubernetes cluster:
-
-    {{< copyable "shell-regular" >}}
+    First, create a directory which saves the files that `cert-manager` needs to create certificates:
 
     ```shell
-    kubectl create secret generic <secret-name> --namespace=<namespace> --from-file=tls.crt=~/cfssl/webhook-server.pem --from-file=tls.key=~/cfssl/webhook-server-key.pem --from-file=ca.crt=~/cfssl/ca.pem
+    mkdir -p cert-manager-operator
+    cd cert-manager-operator
+    ```
+
+    Then, create a `tidb-operator-issuer.yaml` file with the following content:
+
+    ```yaml
+    apiVersion: cert-manager.io/v1
+    kind: Issuer
+    metadata:
+      name: tidb-operator-selfsigned-ca-issuer
+      namespace: ${namespace}
+    spec:
+      selfSigned: {}
+    ---
+    apiVersion: cert-manager.io/v1
+    kind: Certificate
+    metadata:
+      name: tidb-operator-ca
+      namespace: ${namespace}
+    spec:
+      secretName: tidb-operator-ca-secret
+      commonName: "TiDB Operator CA"
+      isCA: true
+      duration: 87600h # 10yrs
+      renewBefore: 720h # 30d
+      issuerRef:
+        name: tidb-operator-selfsigned-ca-issuer
+        kind: Issuer
+    ---
+    apiVersion: cert-manager.io/v1
+    kind: Issuer
+    metadata:
+      name: tidb-operator-issuer
+      namespace: ${namespace}
+    spec:
+      ca:
+        secretName: tidb-operator-ca-secret
+    ```
+
+    `${namespace}` is the name of the operator, usually `tidb-operator`. The above YAML file creates three objects:
+
+    - An Issuer object of the SelfSigned type, used to generate the CA certificate needed by Issuer of the CA type;
+    - A Certificate object, whose `isCa` is set to `true`.
+    - An Issuer, used to issue TLS certificates.
+
+    Finally, execute the following command to create an Issuer:
+
+    ```shell
+    kubectl apply -f tidb-operator-issuer.yaml
+    ```
+
+3. Generate the certificate for the admission controller.
+
+    Create `webhook-server.yaml`:
+
+    ``` yaml
+    apiVersion: cert-manager.io/v1
+    kind: Certificate
+    metadata:
+        name: webhook-server-secret
+        namespace: ${namespace}
+    spec:
+        secretName: webhook-server-secret
+        duration: 8760h # 365d
+        renewBefore: 360h # 15d
+        subject:
+        organizations:
+        - PingCAP
+        commonName: "TiDB Operator Webhook"
+        usages:
+        - server auth
+        - client auth
+        dnsNames:
+        - "tidb-admission-webhook.${namespace}",
+        - "tidb-admission-webhook.${namespace}.svc",
+        - "tidb-admission-webhook.${namespace}.svc.cluster",
+        - "tidb-admission-webhook.${namespace}.svc.cluster.local"
+        ipAddresses:
+        - 127.0.0.1
+        - ::1
+        issuerRef:
+        name: tidb-operator-issuer
+        kind: Issuer
+        group: cert-manager.io
+    ```
+
+    `${namespace}` is the namespace which TiDB Operator is deployed in.
+
+    ```shell
+    kubectl apply -f webhook-server.yaml
     ```
 
 4. Modify `values.yaml`, and install or upgrade TiDB Operator.
 
     Get the value of `ca.crt`:
 
-    {{< copyable "shell-regular" >}}
-
     ```shell
-    kubectl get secret <secret-name> --namespace=<release-namespace> -o=jsonpath='{.data.ca\.crt}'
+    kubectl get secret webhook-server-secret --namespace=${namespace} -o=jsonpath='{.data.ca\.crt}'
     ```
 
     Configure the items in `values.yaml` as described below:
@@ -158,7 +164,7 @@ By default, the admission controller and Kubernetes api-server skip the [TLS ver
     admissionWebhook:
       apiservice:
         insecureSkipTLSVerify: false # Enable TLS verification
-        tlsSecret: "<secret-name>" # The name of the secret created in Step 3
+        tlsSecret: "webhook-server-secret" # The name of the secret belonging to the certificate created in Step 3
         caBundle: "<caBundle>" # The value of `ca.crt` obtained in the above step
     ```
 
@@ -180,16 +186,12 @@ TiDB Operator implements many functions using the admission controller. This sec
 
     You can control the gated launch of the TiDB/TiKV component in a TiDB cluster through two annotations, `tidb.pingcap.com/tikv-partition` and `tidb.pingcap.com/tidb-partition`. To set the gated launch of the TiKV component in a TiDB cluster, execute the following commands. The effect of `partition=2` is the same as that of [StatefulSet Partitions](https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/#partitions).
 
-    {{< copyable "shell-regular" >}}
-
     ```shell
     kubectl annotate tidbcluster ${name} -n ${namespace} tidb.pingcap.com/tikv-partition=2 &&
     tidbcluster.pingcap.com/${name} annotated
     ```
 
     Execute the following commands to unset the gated launch:
-
-    {{< copyable "shell-regular" >}}
 
     ```shell
     kubectl annotate tidbcluster ${name} -n ${namespace} tidb.pingcap.com/tikv-partition- &&
